@@ -40,7 +40,7 @@ kind delete cluster --name k8s-labs
 
 | # | Lab | Core Concepts |
 |---|-----|---------------|
-| 01 | [The Cluster is a Living Organism](./Kubernetes/Hands-On%201%20%E2%80%94%20The%20Cluster%20is%20a%20Living%20Organism/) | Pods, Namespaces, Labels, Selectors, Reconciliation Loop |
+| 01 | [The Cluster is a Living Organism](./Kubernetes/Hands-On%201%20—%20The%20Cluster%20is%20a%20Living%20Organism) | Pods, Namespaces, Labels, Selectors, Reconciliation Loop |
 | 02 | Give Your App a Safety Net | Deployments, ReplicaSets, Rolling Updates, Rollback, Resource Limits |
 | 03 | Make Your App Discoverable | Services, CoreDNS, Endpoints, kube-proxy |
 | 04 | Config Without Chaos | ConfigMaps, Secrets, Volume Mounts, Workload Identity |
