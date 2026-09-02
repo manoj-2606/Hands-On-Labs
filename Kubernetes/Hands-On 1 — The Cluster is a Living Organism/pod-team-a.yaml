@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-team-a
+  namespace: team-a
+  labels:
+    env: prod
+    team: a
+    version: v1
+spec:
+  containers:
+    - name: app
+      image: nginx:latest
