@@ -43,7 +43,7 @@ kind delete cluster --name k8s-labs
 | 01 | [The Cluster is a Living Organism](https://github.com/manoj-2606/Hands-On-Labs/tree/main/Kubernetes/Hands-On%201%20%E2%80%94%20The%20Cluster%20is%20a%20Living%20Organism) | Pods, Namespaces, Labels, Selectors, Reconciliation Loop |
 | 02 | [Give Your App a Safety Net](https://github.com/manoj-2606/Hands-On-Labs/tree/main/Kubernetes/Hands-On%202%20%E2%80%94%20Give%20Your%20App%20a%20Safety%20Net) | Deployments, ReplicaSets, Rolling Updates, Rollback, Resource Limits |
 | 03 | [Make Your App Discoverable](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%203%20%E2%80%94%20Make%20Your%20App%20Discoverable) | Services, CoreDNS, Endpoints, kube-proxy |
-| 04 | Config Without Chaos | ConfigMaps, Secrets, Volume Mounts, Workload Identity |
+| 04 | [Config Without Chaos](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%204%20%E2%80%94%20Config%20Without%20Chaos) | ConfigMaps, Secrets, Volume Mounts, Workload Identity |
 | 05 | Keep Your App Alive and Ready | Liveness, Readiness, Startup Probes, OOMKilled |
 | 06 | Stateful Apps Are a Different Beast | StatefulSets, PVCs, StorageClass, Headless Services, Init Containers |
 | 07 | One Pod Per Node, No Exceptions | DaemonSets, Taints, Tolerations, Node Affinity, Pod Anti-Affinity |
