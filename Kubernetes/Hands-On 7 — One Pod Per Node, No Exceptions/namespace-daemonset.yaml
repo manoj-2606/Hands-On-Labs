@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: daemon-lab
+  labels:
+    env: lab
+    hands-on: "07"
