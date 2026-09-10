@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: myapp
+  namespace: stateful-lab
+spec:
+  serviceName: "myapp" # Must match headless service name
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      initContainers:
+        - name: init-identity
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - echo "Pod identity = $(hostname)" > /data/identity.txt
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: app
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - |
+              echo "=== Identity File ===" && cat /data/identity.txt && sleep 3600
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 100Mi
