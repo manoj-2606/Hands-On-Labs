@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: monitor-pod
+  namespace: rbac-lab
+spec:
+  serviceAccountName: monitor-sa
+  containers:
+    - name: monitor
+      image: curlimages/curl:latest
+      command: ["sleep", "3600"]
