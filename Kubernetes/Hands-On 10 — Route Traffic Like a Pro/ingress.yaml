@@ -1,0 +1,31 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  namespace: ingress-lab
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - localhost
+      secretName: ingress-tls
+  rules:
+    - host: localhost
+      http:
+        paths:
+          - path: /app-a
+            pathType: Prefix
+            backend:
+              service:
+                name: app-a
+                port:
+                  number: 80
+          - path: /app-b
+            pathType: Prefix
+            backend:
+              service:
+                name: app-b
+                port:
+                  number: 80
