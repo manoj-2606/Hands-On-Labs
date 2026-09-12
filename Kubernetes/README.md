@@ -49,7 +49,7 @@ kind delete cluster --name k8s-labs
 | 07 | [One Pod Per Node, No Exceptions](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%207%20%E2%80%94%20One%20Pod%20Per%20Node%2C%20No%20Exceptions) | DaemonSets, Taints, Tolerations, Node Affinity, Pod Anti-Affinity |
 | 08 | [Scale or Die](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%208%20%E2%80%94%20Scale%20or%20Die) | HPA, Metrics Server, KEDA concept, Load Testing |
 | 09 | [Lock It Down](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%209%20%E2%80%94%20Lock%20It%20Down) | RBAC, ServiceAccounts, Roles, ClusterRoles, Workload Identity |
-| 10 | [Route Traffic Like a Pro](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On%209%20%E2%80%94%20Lock%20It%20Down) | Ingress, NGINX Controller, TLS Termination, Path/Host Routing |
+| 10 | [Route Traffic Like a Pro](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-10%20%E2%80%94%20Route%20Traffic%20Like%20a%20Pro) | Ingress, NGINX Controller, TLS Termination, Path/Host Routing |
 | 11 | Networking Internals — No Magic | CNI, kube-proxy, iptables, NetworkPolicy, CoreDNS internals |
 | 12 | Jobs, Cron, and Batch | Jobs, CronJobs, Parallel Processing, Sidecar Pattern |
 | 13 | Helm — Package Your Platform | Helm Charts, Templating, Multi-env Deployments, Rollback |
