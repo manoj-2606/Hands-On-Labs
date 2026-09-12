@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-b
+  namespace: net-lab
+  labels:
+    app: pod-b
+spec:
+  nodeName: k8s-labs-worker2
+  containers:
+    - name: pod-b
+      image: nicolaka/netshoot
+      command: ["sleep", "infinity"]
