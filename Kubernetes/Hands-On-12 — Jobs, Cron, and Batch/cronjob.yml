@@ -1,0 +1,20 @@
+# cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-job
+  namespace: batch-lab
+spec:
+  schedule: "*/1 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: worker
+              image: busybox
+              command: ["sh", "-c", "echo Scheduled run at $(date); sleep 3"]
+          restartPolicy: Never
