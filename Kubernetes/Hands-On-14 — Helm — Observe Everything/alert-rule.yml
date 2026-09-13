@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sample-app-alerts
+  namespace: app-lab
+  labels:
+    release: kube-prom
+spec:
+  groups:
+  - name: sample-app
+    rules:
+    - alert: SampleAppDown
+      expr: nginx_up{namespace="app-lab"} == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Nginx exporter cannot reach nginx stub_status"
+        description: "Pod {{ $labels.pod }} has nginx_up=0 for more than 1 minute"
