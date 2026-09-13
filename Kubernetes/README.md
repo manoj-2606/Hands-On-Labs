@@ -53,7 +53,7 @@ kind delete cluster --name k8s-labs
 | 11 | [Networking Internals — No Magic](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-11%20%E2%80%94%20Networking%20Internals%20%E2%80%94%20No%20Magic) | CNI, kube-proxy, iptables, NetworkPolicy, CoreDNS internals |
 | 12 | [Jobs, Cron, and Batch](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-12%20%E2%80%94%20Jobs%2C%20Cron%2C%20and%20Batch) | Jobs, CronJobs, Parallel Processing, Sidecar Pattern |
 | 13 | [Helm — Package Your Platform](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-13%20%E2%80%94%20Helm%20%E2%80%94%20Package%20Your%20Platform) | Helm Charts, Templating, Multi-env Deployments, Rollback |
-| 14 | Observe Everything | Prometheus, Grafana, ServiceMonitor, PromQL, Alerting |
+| 14 | [Observe Everything](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-14%20%E2%80%94%20Observe%20Everything) | Prometheus, Grafana, ServiceMonitor, PromQL, Alerting |
 | 15 | GitOps — The Cluster Manages Itself | ArgoCD, Drift Detection, Auto-sync, App of Apps |
 | 16 | Harden, Secure, and Operate Production | Kyverno, Trivy, Pod Security Standards, Azure Key Vault, DR |
 
