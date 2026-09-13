@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parallel-job
+  namespace: batch-lab
+spec:
+  completions: 5
+  parallelism: 2
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: busybox
+          command:
+            ["sh", "-c", "echo Processing item from $(hostname); sleep 5"]
+      restartPolicy: Never
