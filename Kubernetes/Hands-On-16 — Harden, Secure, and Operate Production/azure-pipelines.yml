@@ -26,10 +26,11 @@
 #   keyVaultName       — kv-gitops-lab16
 #
 # NOTE ON PATHS:
-# $(basePath) is NOT used in shell scripts — the em dash in the
-# folder name causes bash to split the path into tokens.
-# Instead every script block sets BASE inline using single quotes
-# around the full path, which prevents splitting.
+# The em dash in the folder name causes bash to split the path
+# into tokens when unquoted. To avoid this, every job that needs
+# the Manifest path creates a symlink at /tmp/manifest using a
+# double-quoted ln -s (handles the em dash once), then sets
+# BASE=/tmp/manifest — a safe, space-free path for all further use.
 # ================================================================
 
 trigger: none
@@ -262,7 +263,7 @@ stages:
   # Stage 1 — Build
   # Multi-stage Docker build targeting runtime stage only.
   # App runs as non-root (USER 1001) — satisfies Kyverno policy.
-  # BASE variable used for all file paths — avoids em dash split.
+  # Symlink created at /tmp/manifest to avoid em dash path split.
   # ============================================================
   - stage: Build
     displayName: "Build Docker Image"
@@ -278,7 +279,10 @@ stages:
             fetchTags: false
 
           - script: |
-              BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+              ln -s \
+                "$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest" \
+                /tmp/manifest
+              BASE=/tmp/manifest
               docker build \
                 --target runtime \
                 --file "${BASE}/app/Dockerfile" \
@@ -306,6 +310,7 @@ stages:
   # Stage 2 — Scan
   # Trivy blocks pipeline on CRITICAL or HIGH CVEs.
   # JSON results published as artifact for audit trail.
+  # No Manifest path needed — no symlink required here.
   # ============================================================
   - stage: Scan
     displayName: "Trivy Vulnerability Scan"
@@ -383,6 +388,7 @@ stages:
   # ============================================================
   # Stage 3 — Push
   # MI-ADO-API handles ACR auth — no stored credentials.
+  # No Manifest path needed — no symlink required here.
   # ============================================================
   - stage: Push
     displayName: "Push to ACR"
@@ -446,7 +452,7 @@ stages:
   # CSI driver already installed as AKS addon in Provision.
   # Applies all 3 Kyverno policies.
   # Labels secured-app namespace with restricted PSS.
-  # BASE variable used for all file paths.
+  # Symlink created at /tmp/manifest to avoid em dash path split.
   # ============================================================
   - stage: SetupSecurity
     displayName: "Setup Security Tools on AKS"
@@ -460,6 +466,12 @@ stages:
           - checkout: self
             fetchDepth: 1
             fetchTags: false
+
+          - script: |
+              ln -s \
+                "$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest" \
+                /tmp/manifest
+            displayName: "Create symlink to Manifest — avoid em dash path split"
 
           - task: AzureCLI@2
             displayName: "Get AKS credentials"
@@ -513,7 +525,7 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                BASE=/tmp/manifest
 
                 helm repo add aquasecurity https://aquasecurity.github.io/helm-charts
                 helm repo update
@@ -544,7 +556,7 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                BASE=/tmp/manifest
 
                 kubectl apply -f "${BASE}/kyverno/policy-no-root.yml"
                 kubectl apply -f "${BASE}/kyverno/policy-require-limits.yml"
@@ -568,7 +580,7 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                BASE=/tmp/manifest
 
                 kubectl apply -f "${BASE}/pod-security/namespace-restricted.yml"
 
@@ -584,7 +596,7 @@ stages:
   # Patches SecretProviderClass with MI client ID + tenant ID.
   # Patches pod-with-secret.yml with ACR image.
   # Waits for pod Ready — CSI driver must mount secret from KV.
-  # BASE variable used for all file paths.
+  # Symlink created at /tmp/manifest to avoid em dash path split.
   # ============================================================
   - stage: Deploy
     displayName: "Deploy Secured App"
@@ -604,6 +616,12 @@ stages:
                 - checkout: self
                   fetchDepth: 1
                   fetchTags: false
+
+                - script: |
+                    ln -s \
+                      "$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest" \
+                      /tmp/manifest
+                  displayName: "Create symlink to Manifest — avoid em dash path split"
 
                 - task: AzureCLI@2
                   displayName: "Get AKS credentials"
@@ -629,7 +647,7 @@ stages:
                         --name $(aksCluster) \
                         --overwrite-existing
 
-                      BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                      BASE=/tmp/manifest
 
                       MI_CLIENT_ID=$(az identity show \
                         --name "mi-secured-app" \
@@ -658,7 +676,7 @@ stages:
                         --name $(aksCluster) \
                         --overwrite-existing
 
-                      BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                      BASE=/tmp/manifest
 
                       FULL_IMAGE="$(acrLoginServer)/$(imageName):$(imageTag)"
 
@@ -687,7 +705,7 @@ stages:
   # Test 1 — Kyverno + PSS: bad-pod must be BLOCKED
   # Test 2 — Trivy Operator: VulnerabilityReport must exist
   # Test 3 — Key Vault CSI: secret must be readable in pod
-  # BASE variable used for all file paths.
+  # Symlink created at /tmp/manifest to avoid em dash path split.
   # ============================================================
   - stage: VerifySecurity
     displayName: "Verify All Security Controls"
@@ -701,6 +719,12 @@ stages:
           - checkout: self
             fetchDepth: 1
             fetchTags: false
+
+          - script: |
+              ln -s \
+                "$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest" \
+                /tmp/manifest
+            displayName: "Create symlink to Manifest — avoid em dash path split"
 
           - task: AzureCLI@2
             displayName: "Get AKS credentials"
@@ -726,7 +750,7 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+                BASE=/tmp/manifest
 
                 echo "=============================="
                 echo "Test 1: Attempting to deploy violating pod"
