@@ -17,15 +17,19 @@
 #                                      (proves all 4 layers work)
 #
 # Variable group: gitops-lab16-vars
-#   serviceConnection     — MI-ADO-API
-#   resourceGroup         — rg-gitops-lab16
-#   location              — centralindia
-#   acrName               — acrgitopslab16 (globally unique)
-#   acrLoginServer        — acrgitopslab16.azurecr.io
-#   aksCluster            — aks-gitops-lab16
-#   keyVaultName          — kv-gitops-lab16
-#   tenantId              — your Azure tenant ID
-#   workloadIdentityClientId — client ID of the managed identity
+#   serviceConnection  — MI-ADO-API
+#   resourceGroup      — rg-gitops-lab16
+#   location           — centralindia
+#   acrName            — acrgitopslab16
+#   acrLoginServer     — acrgitopslab16.azurecr.io
+#   aksCluster         — aks-gitops-lab16
+#   keyVaultName       — kv-gitops-lab16
+#
+# NOTE ON PATHS:
+# $(basePath) is NOT used in shell scripts — the em dash in the
+# folder name causes bash to split the path into tokens.
+# Instead every script block sets BASE inline using single quotes
+# around the full path, which prevents splitting.
 # ================================================================
 
 trigger: none
@@ -36,21 +40,18 @@ variables:
     value: "secured-app"
   - name: imageTag
     value: "$(Build.SourceVersion)"
-  - name: basePath
-    value: "Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
 
-# ============================================================
-# Stage 0 — Provision
-# Creates RG, ACR, AKS + Key Vault + Workload Identity.
-# AKS created with:
-#   --enable-oidc-issuer      — needed for workload identity
-#   --enable-workload-identity — MI federated to K8s SA
-#   --attach-acr              — no pull secrets needed
-# Key Vault CSI driver enabled as AKS addon.
-# Secret "db-password" seeded into Key Vault.
-# Idempotent — safe to rerun.
-# ============================================================
 stages:
+  # ============================================================
+  # Stage 0 — Provision
+  # Creates RG, ACR, AKS + Key Vault + Workload Identity.
+  # AKS created with:
+  #   --enable-oidc-issuer       — needed for workload identity
+  #   --enable-workload-identity — MI federated to K8s SA
+  #   --attach-acr               — no pull secrets needed
+  #   --enable-addons azure-keyvault-secrets-provider — CSI driver
+  # Idempotent — safe to rerun.
+  # ============================================================
   - stage: Provision
     displayName: "Provision — RG, ACR, AKS, Key Vault"
     jobs:
@@ -130,23 +131,21 @@ stages:
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
-                # Get current user/MI object ID and assign Key Vault Secrets Officer
-                CURRENT_OBJ=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || \
-                  az account show --query id -o tsv)
-
                 KV_ID=$(az keyvault show \
                   --name $(keyVaultName) \
                   --resource-group $(resourceGroup) \
                   --query id -o tsv)
 
+                # Grant the pipeline MI Secrets Officer so it can write the secret
+                PIPELINE_OID=$(az account show --query 'user.name' -o tsv 2>/dev/null || true)
+
                 az role assignment create \
                   --role "Key Vault Secrets Officer" \
-                  --assignee-object-id "$(az account show --query 'user.name' -o tsv)" \
+                  --assignee "${PIPELINE_OID}" \
                   --assignee-principal-type ServicePrincipal \
                   --scope "${KV_ID}" \
                   --output none || true
 
-                # Seed the secret
                 az keyvault secret set \
                   --vault-name $(keyVaultName) \
                   --name "db-password" \
@@ -167,13 +166,11 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                # Get AKS OIDC issuer URL
                 OIDC_ISSUER=$(az aks show \
                   --resource-group $(resourceGroup) \
                   --name $(aksCluster) \
                   --query "oidcIssuerProfile.issuerUrl" -o tsv)
 
-                # Create managed identity for the workload
                 az identity create \
                   --name "mi-secured-app" \
                   --resource-group $(resourceGroup) \
@@ -189,7 +186,6 @@ stages:
                   --resource-group $(resourceGroup) \
                   --query principalId -o tsv)
 
-                # Grant MI access to Key Vault secrets
                 KV_ID=$(az keyvault show \
                   --name $(keyVaultName) \
                   --resource-group $(resourceGroup) \
@@ -202,7 +198,6 @@ stages:
                   --scope "${KV_ID}" \
                   --output none
 
-                # Create K8s namespace and ServiceAccount
                 kubectl create namespace secured-app --dry-run=client -o yaml | kubectl apply -f -
 
                 kubectl create serviceaccount secured-app-sa \
@@ -214,7 +209,6 @@ stages:
                   azure.workload.identity/client-id="${MI_CLIENT_ID}" \
                   --overwrite
 
-                # Federate K8s SA to MI
                 az identity federated-credential create \
                   --name "fc-secured-app" \
                   --identity-name "mi-secured-app" \
@@ -224,7 +218,6 @@ stages:
                   --output none
 
                 echo "Workload Identity configured — MI Client ID: ${MI_CLIENT_ID}"
-                echo "##vso[task.setvariable variable=workloadIdentityClientId;isOutput=true]${MI_CLIENT_ID}"
 
           - task: AzureCLI@2
             displayName: "Verify all provisioned resources"
@@ -269,6 +262,7 @@ stages:
   # Stage 1 — Build
   # Multi-stage Docker build targeting runtime stage only.
   # App runs as non-root (USER 1001) — satisfies Kyverno policy.
+  # BASE variable used for all file paths — avoids em dash split.
   # ============================================================
   - stage: Build
     displayName: "Build Docker Image"
@@ -284,12 +278,13 @@ stages:
             fetchTags: false
 
           - script: |
+              BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
               docker build \
                 --target runtime \
-                --file "$(Build.SourcesDirectory)/$(basePath)/app/Dockerfile" \
+                --file "${BASE}/app/Dockerfile" \
                 --tag $(imageName):$(imageTag) \
                 --tag $(imageName):latest \
-                "$(Build.SourcesDirectory)/$(basePath)/app"
+                "${BASE}/app"
             displayName: "Build multi-stage image — target runtime stage"
 
           - script: |
@@ -344,10 +339,7 @@ stages:
 
           - script: |
               cat > /tmp/.trivyignore << 'IGNORE'
-              # ============================================================
-              # OS-level CVEs — status: affected or fix_deferred
-              # No upstream fix available in Debian 13 as of 2026-09-14
-              # ============================================================
+              # OS-level CVEs — no upstream fix in Debian 13 as of 2026-09-14
               CVE-2026-54369
               CVE-2025-69720
               CVE-2026-9538
@@ -356,10 +348,7 @@ stages:
               CVE-2026-78408
               CVE-2026-78409
               CVE-2026-78410
-              # ============================================================
-              # starlette CVEs — fix requires starlette>=0.49.1
-              # fastapi==0.115.12 pins starlette<0.47.0
-              # ============================================================
+              # starlette CVEs — fastapi==0.115.12 pins starlette<0.47.0
               CVE-2025-62727
               CVE-2026-48818
               CVE-2026-54283
@@ -453,12 +442,11 @@ stages:
 
   # ============================================================
   # Stage 4 — Setup Security (parallel with Build/Scan/Push)
-  # Installs:
-  #   - Kyverno via Helm (admission webhook)
-  #   - Trivy Operator via Helm (runtime scanner)
+  # Installs Kyverno + Trivy Operator via Helm.
   # CSI driver already installed as AKS addon in Provision.
   # Applies all 3 Kyverno policies.
   # Labels secured-app namespace with restricted PSS.
+  # BASE variable used for all file paths.
   # ============================================================
   - stage: SetupSecurity
     displayName: "Setup Security Tools on AKS"
@@ -525,6 +513,8 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
+                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
                 helm repo add aquasecurity https://aquasecurity.github.io/helm-charts
                 helm repo update
 
@@ -532,7 +522,7 @@ stages:
 
                 helm upgrade --install trivy-operator aquasecurity/trivy-operator \
                   --namespace trivy-system \
-                  --values "$(Build.SourcesDirectory)/$(basePath)/trivy/trivy-operator-values.yml" \
+                  --values "${BASE}/trivy/trivy-operator-values.yml" \
                   --wait \
                   --timeout 5m
 
@@ -554,9 +544,11 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-no-root.yml"
-                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-require-limits.yml"
-                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-acr-only.yml"
+                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
+                kubectl apply -f "${BASE}/kyverno/policy-no-root.yml"
+                kubectl apply -f "${BASE}/kyverno/policy-require-limits.yml"
+                kubectl apply -f "${BASE}/kyverno/policy-acr-only.yml"
 
                 echo ""
                 echo "=============================="
@@ -576,7 +568,9 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
-                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/pod-security/namespace-restricted.yml"
+                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
+                kubectl apply -f "${BASE}/pod-security/namespace-restricted.yml"
 
                 echo ""
                 echo "=============================="
@@ -587,8 +581,10 @@ stages:
   # ============================================================
   # Stage 5 — Deploy
   # Requires manual approval via ADO Environment gate.
-  # Patches image placeholder, applies SecretProviderClass,
-  # deploys pod with Key Vault secret mounted via CSI driver.
+  # Patches SecretProviderClass with MI client ID + tenant ID.
+  # Patches pod-with-secret.yml with ACR image.
+  # Waits for pod Ready — CSI driver must mount secret from KV.
+  # BASE variable used for all file paths.
   # ============================================================
   - stage: Deploy
     displayName: "Deploy Secured App"
@@ -633,7 +629,8 @@ stages:
                         --name $(aksCluster) \
                         --overwrite-existing
 
-                      # Get workload identity client ID
+                      BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
                       MI_CLIENT_ID=$(az identity show \
                         --name "mi-secured-app" \
                         --resource-group $(resourceGroup) \
@@ -641,14 +638,12 @@ stages:
 
                       TENANT_ID=$(az account show --query tenantId -o tsv)
 
-                      # Patch placeholders in SecretProviderClass
                       sed -i "s|\$(workloadIdentityClientId)|${MI_CLIENT_ID}|g" \
-                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
+                        "${BASE}/keyvault/secretproviderclass.yml"
                       sed -i "s|\$(tenantId)|${TENANT_ID}|g" \
-                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
+                        "${BASE}/keyvault/secretproviderclass.yml"
 
-                      kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
-
+                      kubectl apply -f "${BASE}/keyvault/secretproviderclass.yml"
                       echo "SecretProviderClass applied"
 
                 - task: AzureCLI@2
@@ -663,12 +658,14 @@ stages:
                         --name $(aksCluster) \
                         --overwrite-existing
 
+                      BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
                       FULL_IMAGE="$(acrLoginServer)/$(imageName):$(imageTag)"
 
                       sed -i "s|ACR_PLACEHOLDER|${FULL_IMAGE}|g" \
-                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/pod-with-secret.yml"
+                        "${BASE}/keyvault/pod-with-secret.yml"
 
-                      kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/keyvault/pod-with-secret.yml"
+                      kubectl apply -f "${BASE}/keyvault/pod-with-secret.yml"
 
                       echo "Waiting for pod to be Running..."
                       kubectl wait pod/secured-app-pod \
@@ -690,6 +687,7 @@ stages:
   # Test 1 — Kyverno + PSS: bad-pod must be BLOCKED
   # Test 2 — Trivy Operator: VulnerabilityReport must exist
   # Test 3 — Key Vault CSI: secret must be readable in pod
+  # BASE variable used for all file paths.
   # ============================================================
   - stage: VerifySecurity
     displayName: "Verify All Security Controls"
@@ -728,14 +726,15 @@ stages:
                   --name $(aksCluster) \
                   --overwrite-existing
 
+                BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
                 echo "=============================="
                 echo "Test 1: Attempting to deploy violating pod"
                 echo "Expected: BLOCKED by Kyverno + Pod Security Standards"
                 echo "=============================="
 
-                # Apply bad-pod — this MUST fail
-                if kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/pod-security/test-privileged-pod.yml" 2>&1; then
-                  echo "##[error]SECURITY FAILURE: bad-pod was NOT blocked. Kyverno or PSS is misconfigured."
+                if kubectl apply -f "${BASE}/pod-security/test-privileged-pod.yml" 2>&1; then
+                  echo "##[error]SECURITY FAILURE: bad-pod was NOT blocked."
                   exit 1
                 else
                   echo ""
@@ -758,7 +757,6 @@ stages:
                 echo "Test 2: Checking Trivy VulnerabilityReport"
                 echo "=============================="
 
-                # Wait for Trivy Operator to scan the pod (up to 3 minutes)
                 RETRIES=18
                 for i in $(seq 1 $RETRIES); do
                   REPORT_COUNT=$(kubectl get vulnerabilityreport \
@@ -773,7 +771,7 @@ stages:
                   fi
 
                   if [ "$i" -eq "$RETRIES" ]; then
-                    echo "##[error]FAILURE: No VulnerabilityReport generated after 3 minutes. Trivy Operator may not be scanning."
+                    echo "##[error]FAILURE: No VulnerabilityReport after 3 minutes."
                     exit 1
                   fi
 
@@ -802,7 +800,7 @@ stages:
                   -- cat /mnt/secrets/db-password 2>/dev/null)
 
                 if [ -z "${SECRET_VALUE}" ]; then
-                  echo "##[error]FAILURE: Secret not mounted or empty. Key Vault CSI integration failed."
+                  echo "##[error]FAILURE: Secret not mounted. Key Vault CSI integration failed."
                   exit 1
                 else
                   echo ""
