@@ -1,0 +1,33 @@
+# ============================================================
+# Trivy Operator — Helm values
+# Trivy Operator runs INSIDE the cluster as a controller.
+# Different from Trivy in the pipeline (image scan before push).
+#
+# Pipeline Trivy  = scans image BEFORE it enters the cluster
+# Trivy Operator  = scans images ALREADY RUNNING in the cluster
+#
+# When a pod is created, Trivy Operator automatically creates
+# a VulnerabilityReport CRD for it — no manual scan needed.
+# Reports are queryable via kubectl.
+#
+# Installed via Helm in the SetupSecurity pipeline stage.
+# ============================================================
+trivy:
+  ignoreUnfixed: true
+
+operator:
+  scanJobTimeout: 5m
+  vulnerabilityScannerEnabled: true
+  configAuditScannerEnabled: true
+  rbacAssessmentScannerEnabled: true
+
+serviceAccount:
+  create: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

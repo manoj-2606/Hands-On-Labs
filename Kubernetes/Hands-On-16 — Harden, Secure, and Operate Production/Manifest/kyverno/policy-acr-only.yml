@@ -1,0 +1,35 @@
+# ============================================================
+# Kyverno Policy — ACR Images Only
+# Blocks any pod pulling images from outside your ACR.
+# Prevents supply chain attacks via public images in prod.
+# Replace acrgitopslab16.azurecr.io with your actual ACR.
+# ============================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: acr-images-only
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-image-registry
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kube-system
+          - argocd
+          - kyverno
+          - trivy-system
+          - monitoring
+    validate:
+      message: "Images must be pulled from acrgitopslab16.azurecr.io only. Public registry images are not allowed."
+      pattern:
+        spec:
+          containers:
+          - image: "acrgitopslab16.azurecr.io/*"

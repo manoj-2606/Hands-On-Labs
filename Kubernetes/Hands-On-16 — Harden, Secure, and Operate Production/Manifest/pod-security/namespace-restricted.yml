@@ -1,0 +1,25 @@
+# ============================================================
+# Pod Security Standards — Restricted Profile
+# Applied at namespace level via labels.
+# Kubernetes built-in — no extra tool needed.
+#
+# Three levels:
+#   privileged → no restrictions
+#   baseline   → blocks known privilege escalations
+#   restricted → hardened, production-grade
+#
+# enforce = reject violating pods
+# audit   = allow but log violations
+# warn    = allow but return warning to kubectl
+#
+# We set all three so violations are rejected, logged,
+# and warned simultaneously.
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secured-app
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

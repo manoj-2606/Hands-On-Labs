@@ -1,0 +1,26 @@
+# ============================================================
+# Intentionally Violating Pod — DO NOT deploy to production
+# This pod violates ALL three Pod Security Standards:
+#   1. runs as root (runAsUser: 0)
+#   2. privileged: true (full node access)
+#   3. no securityContext on container
+#
+# Purpose: prove that Pod Security Standards + Kyverno
+# block this pod before it ever reaches a node.
+#
+# Expected result when applied to secured-app namespace:
+#   Error from server (Forbidden): pods "bad-pod" is forbidden:
+#   violates PodSecurity "restricted:latest"
+# ============================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod
+  namespace: secured-app
+spec:
+  containers:
+  - name: bad-container
+    image: nginx
+    securityContext:
+      privileged: true
+      runAsUser: 0

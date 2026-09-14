@@ -1,0 +1,28 @@
+# ============================================================
+# Kyverno Policy — Require Resource Limits
+# Every container must declare CPU and memory limits.
+# Prevents noisy-neighbour problems and OOMKilled cascades.
+# ============================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  - name: check-resource-limits
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: "All containers must define resources.limits.cpu and resources.limits.memory."
+      pattern:
+        spec:
+          containers:
+          - resources:
+              limits:
+                cpu: "?*"
+                memory: "?*"
