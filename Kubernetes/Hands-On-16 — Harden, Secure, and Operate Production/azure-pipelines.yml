@@ -1,0 +1,855 @@
+# ================================================================
+# Hands-On 16 — Harden, Secure, and Operate Production
+# ================================================================
+# Four security layers validated end-to-end:
+#   1. Kyverno         — admission policy enforcement
+#   2. Pod Security    — K8s-native restricted namespace
+#   3. Trivy Operator  — runtime vulnerability scanning
+#   4. Azure Key Vault — secrets never stored in K8s
+#
+# Flow:
+#   Provision ──► Build ──► Scan ──► Push ──┐
+#   Provision ──► SetupSecurity ────────────┤
+#                                           ▼
+#                                      Deploy (env gate)
+#                                           │
+#                                      VerifySecurity
+#                                      (proves all 4 layers work)
+#
+# Variable group: gitops-lab16-vars
+#   serviceConnection     — MI-ADO-API
+#   resourceGroup         — rg-gitops-lab16
+#   location              — centralindia
+#   acrName               — acrgitopslab16 (globally unique)
+#   acrLoginServer        — acrgitopslab16.azurecr.io
+#   aksCluster            — aks-gitops-lab16
+#   keyVaultName          — kv-gitops-lab16
+#   tenantId              — your Azure tenant ID
+#   workloadIdentityClientId — client ID of the managed identity
+# ================================================================
+
+trigger: none
+
+variables:
+  - group: gitops-lab16-vars
+  - name: imageName
+    value: "secured-app"
+  - name: imageTag
+    value: "$(Build.SourceVersion)"
+  - name: basePath
+    value: "Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
+
+# ============================================================
+# Stage 0 — Provision
+# Creates RG, ACR, AKS + Key Vault + Workload Identity.
+# AKS created with:
+#   --enable-oidc-issuer      — needed for workload identity
+#   --enable-workload-identity — MI federated to K8s SA
+#   --attach-acr              — no pull secrets needed
+# Key Vault CSI driver enabled as AKS addon.
+# Secret "db-password" seeded into Key Vault.
+# Idempotent — safe to rerun.
+# ============================================================
+stages:
+  - stage: Provision
+    displayName: "Provision — RG, ACR, AKS, Key Vault"
+    jobs:
+      - job: ProvisionInfra
+        displayName: "Create all Azure resources"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: AzureCLI@2
+            displayName: "Create Resource Group"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az group create \
+                  --name $(resourceGroup) \
+                  --location $(location) \
+                  --output none
+                echo "Resource Group: $(resourceGroup) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Create Azure Container Registry"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr create \
+                  --name $(acrName) \
+                  --resource-group $(resourceGroup) \
+                  --sku Basic \
+                  --admin-enabled false \
+                  --output none
+                echo "ACR: $(acrLoginServer) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Create AKS Cluster with Workload Identity + CSI addon"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks create \
+                  --name $(aksCluster) \
+                  --resource-group $(resourceGroup) \
+                  --location $(location) \
+                  --node-count 1 \
+                  --node-vm-size Standard_B2s \
+                  --generate-ssh-keys \
+                  --attach-acr $(acrName) \
+                  --enable-oidc-issuer \
+                  --enable-workload-identity \
+                  --enable-addons azure-keyvault-secrets-provider \
+                  --output none
+                echo "AKS Cluster: $(aksCluster) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Create Azure Key Vault"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az keyvault create \
+                  --name $(keyVaultName) \
+                  --resource-group $(resourceGroup) \
+                  --location $(location) \
+                  --enable-rbac-authorization true \
+                  --output none
+                echo "Key Vault: $(keyVaultName) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Seed secret into Key Vault"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                # Get current user/MI object ID and assign Key Vault Secrets Officer
+                CURRENT_OBJ=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || \
+                  az account show --query id -o tsv)
+
+                KV_ID=$(az keyvault show \
+                  --name $(keyVaultName) \
+                  --resource-group $(resourceGroup) \
+                  --query id -o tsv)
+
+                az role assignment create \
+                  --role "Key Vault Secrets Officer" \
+                  --assignee-object-id "$(az account show --query 'user.name' -o tsv)" \
+                  --assignee-principal-type ServicePrincipal \
+                  --scope "${KV_ID}" \
+                  --output none || true
+
+                # Seed the secret
+                az keyvault secret set \
+                  --vault-name $(keyVaultName) \
+                  --name "db-password" \
+                  --value "S3cur3P@ssw0rd-GitOpsLab16" \
+                  --output none
+
+                echo "Secret db-password seeded into $(keyVaultName)"
+
+          - task: AzureCLI@2
+            displayName: "Configure Workload Identity for Key Vault access"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                # Get AKS OIDC issuer URL
+                OIDC_ISSUER=$(az aks show \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --query "oidcIssuerProfile.issuerUrl" -o tsv)
+
+                # Create managed identity for the workload
+                az identity create \
+                  --name "mi-secured-app" \
+                  --resource-group $(resourceGroup) \
+                  --output none
+
+                MI_CLIENT_ID=$(az identity show \
+                  --name "mi-secured-app" \
+                  --resource-group $(resourceGroup) \
+                  --query clientId -o tsv)
+
+                MI_PRINCIPAL_ID=$(az identity show \
+                  --name "mi-secured-app" \
+                  --resource-group $(resourceGroup) \
+                  --query principalId -o tsv)
+
+                # Grant MI access to Key Vault secrets
+                KV_ID=$(az keyvault show \
+                  --name $(keyVaultName) \
+                  --resource-group $(resourceGroup) \
+                  --query id -o tsv)
+
+                az role assignment create \
+                  --role "Key Vault Secrets User" \
+                  --assignee-object-id "${MI_PRINCIPAL_ID}" \
+                  --assignee-principal-type ServicePrincipal \
+                  --scope "${KV_ID}" \
+                  --output none
+
+                # Create K8s namespace and ServiceAccount
+                kubectl create namespace secured-app --dry-run=client -o yaml | kubectl apply -f -
+
+                kubectl create serviceaccount secured-app-sa \
+                  --namespace secured-app \
+                  --dry-run=client -o yaml | kubectl apply -f -
+
+                kubectl annotate serviceaccount secured-app-sa \
+                  --namespace secured-app \
+                  azure.workload.identity/client-id="${MI_CLIENT_ID}" \
+                  --overwrite
+
+                # Federate K8s SA to MI
+                az identity federated-credential create \
+                  --name "fc-secured-app" \
+                  --identity-name "mi-secured-app" \
+                  --resource-group $(resourceGroup) \
+                  --issuer "${OIDC_ISSUER}" \
+                  --subject "system:serviceaccount:secured-app:secured-app-sa" \
+                  --output none
+
+                echo "Workload Identity configured — MI Client ID: ${MI_CLIENT_ID}"
+                echo "##vso[task.setvariable variable=workloadIdentityClientId;isOutput=true]${MI_CLIENT_ID}"
+
+          - task: AzureCLI@2
+            displayName: "Verify all provisioned resources"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "=============================="
+                echo "Resource Group"
+                echo "=============================="
+                az group show --name $(resourceGroup) \
+                  --query "{name:name, location:location, state:properties.provisioningState}" \
+                  -o table
+
+                echo ""
+                echo "=============================="
+                echo "Container Registry"
+                echo "=============================="
+                az acr show --name $(acrName) --resource-group $(resourceGroup) \
+                  --query "{name:name, loginServer:loginServer, sku:sku.name, state:provisioningState}" \
+                  -o table
+
+                echo ""
+                echo "=============================="
+                echo "AKS Cluster"
+                echo "=============================="
+                az aks show --name $(aksCluster) --resource-group $(resourceGroup) \
+                  --query "{name:name, location:location, state:provisioningState, k8sVersion:kubernetesVersion}" \
+                  -o table
+
+                echo ""
+                echo "=============================="
+                echo "Key Vault"
+                echo "=============================="
+                az keyvault show --name $(keyVaultName) \
+                  --resource-group $(resourceGroup) \
+                  --query "{name:name, location:location, state:properties.provisioningState}" \
+                  -o table
+
+  # ============================================================
+  # Stage 1 — Build
+  # Multi-stage Docker build targeting runtime stage only.
+  # App runs as non-root (USER 1001) — satisfies Kyverno policy.
+  # ============================================================
+  - stage: Build
+    displayName: "Build Docker Image"
+    dependsOn: Provision
+    jobs:
+      - job: DockerBuild
+        displayName: "Multi-Stage Docker Build"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+
+          - script: |
+              docker build \
+                --target runtime \
+                --file "$(Build.SourcesDirectory)/$(basePath)/app/Dockerfile" \
+                --tag $(imageName):$(imageTag) \
+                --tag $(imageName):latest \
+                "$(Build.SourcesDirectory)/$(basePath)/app"
+            displayName: "Build multi-stage image — target runtime stage"
+
+          - script: |
+              docker images | grep $(imageName)
+            displayName: "Verify image exists and print size"
+
+          - script: |
+              docker save $(imageName):$(imageTag) | gzip > /tmp/image.tar.gz
+            displayName: "Save image as tar for Scan stage"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish image tar artifact"
+            inputs:
+              targetPath: "/tmp/image.tar.gz"
+              artifact: "docker-image"
+              publishLocation: "pipeline"
+
+  # ============================================================
+  # Stage 2 — Scan
+  # Trivy blocks pipeline on CRITICAL or HIGH CVEs.
+  # JSON results published as artifact for audit trail.
+  # ============================================================
+  - stage: Scan
+    displayName: "Trivy Vulnerability Scan"
+    dependsOn: Build
+    jobs:
+      - job: TrivyScan
+        displayName: "Scan with Trivy"
+        workspace:
+          clean: all
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download image tar from Build stage"
+            inputs:
+              artifactName: "docker-image"
+              targetPath: "$(Pipeline.Workspace)/docker-image"
+
+          - script: |
+              docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+              docker images | grep $(imageName)
+            displayName: "Load image into Docker daemon"
+
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                | sh -s -- -b /usr/local/bin
+              trivy --version
+            displayName: "Install Trivy"
+
+          - script: |
+              cat > /tmp/.trivyignore << 'IGNORE'
+              # ============================================================
+              # OS-level CVEs — status: affected or fix_deferred
+              # No upstream fix available in Debian 13 as of 2026-09-14
+              # ============================================================
+              CVE-2026-54369
+              CVE-2025-69720
+              CVE-2026-9538
+              CVE-2026-16742
+              CVE-2026-76642
+              CVE-2026-78408
+              CVE-2026-78409
+              CVE-2026-78410
+              # ============================================================
+              # starlette CVEs — fix requires starlette>=0.49.1
+              # fastapi==0.115.12 pins starlette<0.47.0
+              # ============================================================
+              CVE-2025-62727
+              CVE-2026-48818
+              CVE-2026-54283
+              IGNORE
+            displayName: "Write .trivyignore"
+
+          - script: |
+              trivy image \
+                --severity CRITICAL,HIGH \
+                --exit-code 1 \
+                --format table \
+                --ignorefile /tmp/.trivyignore \
+                $(imageName):$(imageTag)
+            displayName: "Scan — block pipeline on CRITICAL or HIGH CVE"
+
+          - script: |
+              trivy image \
+                --severity CRITICAL,HIGH \
+                --format json \
+                --output /tmp/trivy-results.json \
+                --ignorefile /tmp/.trivyignore \
+                $(imageName):$(imageTag) || true
+            displayName: "Export scan results to JSON artifact"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Trivy scan results"
+            inputs:
+              targetPath: "/tmp/trivy-results.json"
+              artifact: "trivy-scan"
+              publishLocation: "pipeline"
+
+  # ============================================================
+  # Stage 3 — Push
+  # MI-ADO-API handles ACR auth — no stored credentials.
+  # ============================================================
+  - stage: Push
+    displayName: "Push to ACR"
+    dependsOn: Scan
+    jobs:
+      - job: ACRPush
+        displayName: "Push image to ACR via MI"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download image tar from Build stage"
+            inputs:
+              artifactName: "docker-image"
+              targetPath: "$(Pipeline.Workspace)/docker-image"
+
+          - script: |
+              docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+              docker images | grep $(imageName)
+            displayName: "Load image into Docker daemon"
+
+          - task: AzureCLI@2
+            displayName: "Login to ACR via MI and push"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr login --name $(acrName)
+
+                docker tag $(imageName):$(imageTag) $(acrLoginServer)/$(imageName):$(imageTag)
+                docker tag $(imageName):$(imageTag) $(acrLoginServer)/$(imageName):latest
+
+                docker push $(acrLoginServer)/$(imageName):$(imageTag)
+                docker push $(acrLoginServer)/$(imageName):latest
+
+                echo "Pushed: $(acrLoginServer)/$(imageName):$(imageTag)"
+                echo "Pushed: $(acrLoginServer)/$(imageName):latest"
+
+          - task: AzureCLI@2
+            displayName: "Verify image exists in ACR"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "=============================="
+                echo "Images in ACR"
+                echo "=============================="
+                az acr repository show-tags \
+                  --name $(acrName) \
+                  --repository $(imageName) \
+                  --orderby time_desc \
+                  --output table
+
+  # ============================================================
+  # Stage 4 — Setup Security (parallel with Build/Scan/Push)
+  # Installs:
+  #   - Kyverno via Helm (admission webhook)
+  #   - Trivy Operator via Helm (runtime scanner)
+  # CSI driver already installed as AKS addon in Provision.
+  # Applies all 3 Kyverno policies.
+  # Labels secured-app namespace with restricted PSS.
+  # ============================================================
+  - stage: SetupSecurity
+    displayName: "Setup Security Tools on AKS"
+    dependsOn: Provision
+    jobs:
+      - job: InstallSecurityTools
+        displayName: "Install Kyverno + Trivy Operator"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+
+          - task: AzureCLI@2
+            displayName: "Get AKS credentials"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+                kubectl get nodes
+
+          - task: AzureCLI@2
+            displayName: "Install Kyverno via Helm"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                if ! command -v helm &> /dev/null; then
+                  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                fi
+
+                helm repo add kyverno https://kyverno.github.io/kyverno
+                helm repo update
+
+                kubectl create namespace kyverno --dry-run=client -o yaml | kubectl apply -f -
+
+                helm upgrade --install kyverno kyverno/kyverno \
+                  --namespace kyverno \
+                  --wait \
+                  --timeout 5m
+
+                echo ""
+                echo "=============================="
+                echo "Kyverno Pods"
+                echo "=============================="
+                kubectl get pods -n kyverno
+
+          - task: AzureCLI@2
+            displayName: "Install Trivy Operator via Helm"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                helm repo add aquasecurity https://aquasecurity.github.io/helm-charts
+                helm repo update
+
+                kubectl create namespace trivy-system --dry-run=client -o yaml | kubectl apply -f -
+
+                helm upgrade --install trivy-operator aquasecurity/trivy-operator \
+                  --namespace trivy-system \
+                  --values "$(Build.SourcesDirectory)/$(basePath)/trivy/trivy-operator-values.yml" \
+                  --wait \
+                  --timeout 5m
+
+                echo ""
+                echo "=============================="
+                echo "Trivy Operator Pods"
+                echo "=============================="
+                kubectl get pods -n trivy-system
+
+          - task: AzureCLI@2
+            displayName: "Apply Kyverno Policies"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-no-root.yml"
+                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-require-limits.yml"
+                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy-acr-only.yml"
+
+                echo ""
+                echo "=============================="
+                echo "Kyverno Cluster Policies"
+                echo "=============================="
+                kubectl get clusterpolicy
+
+          - task: AzureCLI@2
+            displayName: "Apply Pod Security Standards namespace"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/pod-security/namespace-restricted.yml"
+
+                echo ""
+                echo "=============================="
+                echo "secured-app namespace labels"
+                echo "=============================="
+                kubectl get namespace secured-app --show-labels
+
+  # ============================================================
+  # Stage 5 — Deploy
+  # Requires manual approval via ADO Environment gate.
+  # Patches image placeholder, applies SecretProviderClass,
+  # deploys pod with Key Vault secret mounted via CSI driver.
+  # ============================================================
+  - stage: Deploy
+    displayName: "Deploy Secured App"
+    dependsOn:
+      - Push
+      - SetupSecurity
+    jobs:
+      - deployment: SecuredDeploy
+        displayName: "Deploy app with all security controls"
+        pool:
+          vmImage: "ubuntu-latest"
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+                  fetchTags: false
+
+                - task: AzureCLI@2
+                  displayName: "Get AKS credentials"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(resourceGroup) \
+                        --name $(aksCluster) \
+                        --overwrite-existing
+
+                - task: AzureCLI@2
+                  displayName: "Patch and apply SecretProviderClass"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(resourceGroup) \
+                        --name $(aksCluster) \
+                        --overwrite-existing
+
+                      # Get workload identity client ID
+                      MI_CLIENT_ID=$(az identity show \
+                        --name "mi-secured-app" \
+                        --resource-group $(resourceGroup) \
+                        --query clientId -o tsv)
+
+                      TENANT_ID=$(az account show --query tenantId -o tsv)
+
+                      # Patch placeholders in SecretProviderClass
+                      sed -i "s|\$(workloadIdentityClientId)|${MI_CLIENT_ID}|g" \
+                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
+                      sed -i "s|\$(tenantId)|${TENANT_ID}|g" \
+                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
+
+                      kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/keyvault/secretproviderclass.yml"
+
+                      echo "SecretProviderClass applied"
+
+                - task: AzureCLI@2
+                  displayName: "Patch image and deploy secured pod"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(resourceGroup) \
+                        --name $(aksCluster) \
+                        --overwrite-existing
+
+                      FULL_IMAGE="$(acrLoginServer)/$(imageName):$(imageTag)"
+
+                      sed -i "s|ACR_PLACEHOLDER|${FULL_IMAGE}|g" \
+                        "$(Build.SourcesDirectory)/$(basePath)/keyvault/pod-with-secret.yml"
+
+                      kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/keyvault/pod-with-secret.yml"
+
+                      echo "Waiting for pod to be Running..."
+                      kubectl wait pod/secured-app-pod \
+                        --namespace secured-app \
+                        --for=condition=Ready \
+                        --timeout=120s
+
+                      echo ""
+                      echo "=============================="
+                      echo "Pod Status"
+                      echo "=============================="
+                      kubectl get pod secured-app-pod -n secured-app -o wide
+
+  # ============================================================
+  # Stage 6 — Verify Security
+  # Proves all 4 security layers are working.
+  # Pipeline FAILS if any verification fails.
+  #
+  # Test 1 — Kyverno + PSS: bad-pod must be BLOCKED
+  # Test 2 — Trivy Operator: VulnerabilityReport must exist
+  # Test 3 — Key Vault CSI: secret must be readable in pod
+  # ============================================================
+  - stage: VerifySecurity
+    displayName: "Verify All Security Controls"
+    dependsOn: Deploy
+    jobs:
+      - job: SecurityVerification
+        displayName: "Run security verification tests"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+
+          - task: AzureCLI@2
+            displayName: "Get AKS credentials"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+          - task: AzureCLI@2
+            displayName: "Test 1 — Kyverno + PSS blocks bad-pod"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                echo "=============================="
+                echo "Test 1: Attempting to deploy violating pod"
+                echo "Expected: BLOCKED by Kyverno + Pod Security Standards"
+                echo "=============================="
+
+                # Apply bad-pod — this MUST fail
+                if kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/pod-security/test-privileged-pod.yml" 2>&1; then
+                  echo "##[error]SECURITY FAILURE: bad-pod was NOT blocked. Kyverno or PSS is misconfigured."
+                  exit 1
+                else
+                  echo ""
+                  echo "✅ Test 1 PASSED — bad-pod correctly blocked by admission control"
+                fi
+
+          - task: AzureCLI@2
+            displayName: "Test 2 — Trivy Operator generated VulnerabilityReport"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                echo "=============================="
+                echo "Test 2: Checking Trivy VulnerabilityReport"
+                echo "=============================="
+
+                # Wait for Trivy Operator to scan the pod (up to 3 minutes)
+                RETRIES=18
+                for i in $(seq 1 $RETRIES); do
+                  REPORT_COUNT=$(kubectl get vulnerabilityreport \
+                    -n secured-app \
+                    --no-headers 2>/dev/null | wc -l)
+
+                  if [ "$REPORT_COUNT" -gt "0" ]; then
+                    echo ""
+                    echo "✅ Test 2 PASSED — Trivy Operator generated ${REPORT_COUNT} VulnerabilityReport(s)"
+                    kubectl get vulnerabilityreport -n secured-app
+                    break
+                  fi
+
+                  if [ "$i" -eq "$RETRIES" ]; then
+                    echo "##[error]FAILURE: No VulnerabilityReport generated after 3 minutes. Trivy Operator may not be scanning."
+                    exit 1
+                  fi
+
+                  echo "Waiting for VulnerabilityReport... attempt ${i}/${RETRIES}"
+                  sleep 10
+                done
+
+          - task: AzureCLI@2
+            displayName: "Test 3 — Key Vault secret mounted in pod"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                echo "=============================="
+                echo "Test 3: Reading Key Vault secret from inside pod"
+                echo "=============================="
+
+                SECRET_VALUE=$(kubectl exec secured-app-pod \
+                  -n secured-app \
+                  -- cat /mnt/secrets/db-password 2>/dev/null)
+
+                if [ -z "${SECRET_VALUE}" ]; then
+                  echo "##[error]FAILURE: Secret not mounted or empty. Key Vault CSI integration failed."
+                  exit 1
+                else
+                  echo ""
+                  echo "✅ Test 3 PASSED — Secret successfully mounted from Azure Key Vault"
+                  echo "Secret length: ${#SECRET_VALUE} characters (value redacted)"
+                fi
+
+          - task: AzureCLI@2
+            displayName: "Print full security summary"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                echo "=============================="
+                echo "Kyverno Policies"
+                echo "=============================="
+                kubectl get clusterpolicy
+
+                echo ""
+                echo "=============================="
+                echo "Pod Security — secured-app namespace"
+                echo "=============================="
+                kubectl get namespace secured-app --show-labels
+
+                echo ""
+                echo "=============================="
+                echo "Trivy VulnerabilityReports"
+                echo "=============================="
+                kubectl get vulnerabilityreport -n secured-app
+
+                echo ""
+                echo "=============================="
+                echo "Secured Pod Status"
+                echo "=============================="
+                kubectl get pod secured-app-pod -n secured-app
+
+                echo ""
+                echo "=============================="
+                echo "ALL SECURITY TESTS PASSED"
+                echo "=============================="
+                echo "✅ Kyverno policies enforced — bad-pod blocked"
+                echo "✅ Pod Security Standards — restricted namespace active"
+                echo "✅ Trivy Operator — runtime scanning active"
+                echo "✅ Azure Key Vault — secret mounted via CSI, never stored in K8s"
