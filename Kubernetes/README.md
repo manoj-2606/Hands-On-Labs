@@ -55,7 +55,7 @@ kind delete cluster --name k8s-labs
 | 13 | [Helm — Package Your Platform](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-13%20%E2%80%94%20Helm%20%E2%80%94%20Package%20Your%20Platform) | Helm Charts, Templating, Multi-env Deployments, Rollback |
 | 14 | [Observe Everything](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-14%20%E2%80%94%20Observe%20Everything) | Prometheus, Grafana, ServiceMonitor, PromQL, Alerting |
 | 15 | [GitOps — The Cluster Manages Itself](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-15%20%E2%80%94%20GitOps%20%E2%80%94%20The%20Cluster%20Manages%20Itself) | ArgoCD, Drift Detection, Auto-sync, App of Apps |
-| 16 | Harden, Secure, and Operate Production | Kyverno, Trivy, Pod Security Standards, Azure Key Vault, DR |
+| 16 | [Harden, Secure, and Operate Production](https://dev.azure.com/manojmanojkumar2513/_git/Hands-On-Labs?path=/Kubernetes/Hands-On-16%20%E2%80%94%20Harden%2C%20Secure%2C%20and%20Operate%20Production) | Kyverno, Trivy, Pod Security Standards, Azure Key Vault, DR |
 
 ---
 
