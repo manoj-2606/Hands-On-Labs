@@ -778,6 +778,28 @@ stages:
                   --overwrite-existing
 
                 echo "=============================="
+                echo "Trivy Operator Pod Status"
+                echo "=============================="
+                kubectl get pods -n trivy-system
+                kubectl describe pods -n trivy-system | grep -A5 "Events:"
+
+                echo ""
+                echo "=============================="
+                echo "Trivy Operator Logs"
+                echo "=============================="
+                kubectl logs -n trivy-system \
+                  -l app.kubernetes.io/name=trivy-operator \
+                  --tail=50
+
+                echo ""
+                echo "=============================="
+                echo "Scan Jobs in secured-app"
+                echo "=============================="
+                kubectl get jobs -n secured-app
+                kubectl get pods -n secured-app
+
+                echo ""
+                echo "=============================="
                 echo "Test 2: Checking Trivy VulnerabilityReport"
                 echo "=============================="
 
