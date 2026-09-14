@@ -1,10 +1,3 @@
-# ============================================================
-# Kyverno Policy — No Root Containers
-# Blocks any pod that runs as root (UID 0) or does not
-# explicitly set runAsNonRoot: true.
-# Effect: pods violating this are rejected at admission time
-# before they are scheduled — they never reach a node.
-# ============================================================
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -19,6 +12,14 @@ spec:
       - resources:
           kinds:
           - Pod
+          - Job
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kube-system
+          - kyverno
+          - trivy-system
     validate:
       message: "Containers must not run as root. Set securityContext.runAsNonRoot: true and runAsUser >= 1000."
       pattern:
