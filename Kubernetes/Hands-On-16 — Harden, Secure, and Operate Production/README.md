@@ -112,6 +112,27 @@ flowchart TD
     KV -->|"CSI driver fetches\nat pod start"| SecretMount
     MI -->|"Workload Identity\nfederated to SA"| KV
     KyvernoPod -->|"intercepts\nkubectl apply bad-pod"| Block
+
+    style Provision fill:#4A90D9,color:#fff
+    style Build fill:#1ABC9C,color:#fff
+    style Scan fill:#F5A623,color:#fff
+    style Push fill:#1ABC9C,color:#fff
+    style SetupSec fill:#7B68EE,color:#fff
+    style Deploy fill:#E8534A,color:#fff
+    style Verify fill:#E8534A,color:#fff
+    style KyvernoPod fill:#7B68EE,color:#fff
+    style TrivyOp fill:#F5A623,color:#fff
+    style Pod fill:#1ABC9C,color:#fff
+    style BadPod fill:#E8534A,color:#fff
+    style Block fill:#E8534A,color:#fff
+    style ACR fill:#4A90D9,color:#fff
+    style KV fill:#F5A623,color:#fff
+    style MI fill:#2C3E50,color:#fff
+    style VR fill:#F5A623,color:#fff
+    style SecretMount fill:#2C3E50,color:#fff
+    style P1 fill:#7B68EE,color:#fff
+    style P2 fill:#7B68EE,color:#fff
+    style P3 fill:#7B68EE,color:#fff
 ```
 
 ---
@@ -151,6 +172,16 @@ flowchart LR
 
     API --> Layer1 --> Layer2 --> Layer3 --> Layer4
     API --> BadRequest
+
+    style API fill:#4A90D9,color:#fff
+    style K1 fill:#7B68EE,color:#fff
+    style K2 fill:#7B68EE,color:#fff
+    style K3 fill:#7B68EE,color:#fff
+    style PSS fill:#1ABC9C,color:#fff
+    style TO fill:#F5A623,color:#fff
+    style CSI fill:#2C3E50,color:#fff
+    style BP fill:#E8534A,color:#fff
+    style BLOCKED fill:#E8534A,color:#fff
 ```
 
 ---
@@ -190,6 +221,20 @@ flowchart TD
     Secret -->|"fetched at pod start"| KVCall
     MI -->|"RBAC: Key Vault Secrets User"| Secret
     TMPFS -.->|"pod stops →\nTMPFS unmounted →\nsecret gone"| NeverStored
+
+    style Secret fill:#F5A623,color:#fff
+    style SA fill:#4A90D9,color:#fff
+    style MI fill:#4A90D9,color:#fff
+    style FC fill:#4A90D9,color:#fff
+    style PodStart fill:#2C3E50,color:#fff
+    style CSIDriver fill:#7B68EE,color:#fff
+    style KVCall fill:#7B68EE,color:#fff
+    style TMPFS fill:#1ABC9C,color:#fff
+    style PodReady fill:#1ABC9C,color:#fff
+    style NoEtcd fill:#E8534A,color:#fff
+    style NoKubectl fill:#E8534A,color:#fff
+    style NoDisk fill:#E8534A,color:#fff
+    style NoGit fill:#E8534A,color:#fff
 ```
 
 ---
@@ -238,9 +283,16 @@ UID 1001 satisfies `runAsUser >= 1000` in the Kyverno policy.
 
 ### `Manifest/kyverno/policy-no-root.yml` — Block Root Containers
 
-`validationFailureAction: Enforce` — hard block, not audit. Pod rejected at API server before scheduling.
+`validationFailureAction: Enforce` — hard block, not audit. Pod rejected at API server before scheduling. The `exclude` block lists all system namespaces (`kube-system`, `kyverno`, `trivy-system`) so Trivy Operator's scan jobs — which run as root internally — are not blocked by this policy.
 
 ```yaml
+exclude:
+  any:
+  - resources:
+      namespaces:
+      - kube-system
+      - kyverno
+      - trivy-system
 validate:
   pattern:
     spec:
@@ -256,38 +308,11 @@ validate:
 
 Every container must declare both `cpu` and `memory` limits. Prevents noisy-neighbour problems and OOMKilled cascades on shared nodes.
 
-```yaml
-validate:
-  pattern:
-    spec:
-      containers:
-      - resources:
-          limits:
-            cpu: "?*"
-            memory: "?*"
-```
-
 ---
 
 ### `Manifest/kyverno/policy-acr-only.yml` — ACR Images Only
 
-Blocks supply chain attacks via public registry images. System namespaces (`kube-system`, `argocd`, `kyverno`, `trivy-system`) are excluded — they pull from public registries legitimately.
-
-```yaml
-exclude:
-  any:
-  - resources:
-      namespaces:
-      - kube-system
-      - argocd
-      - kyverno
-      - trivy-system
-validate:
-  pattern:
-    spec:
-      containers:
-      - image: "acrgitopslab16.azurecr.io/*"
-```
+Blocks supply chain attacks via public registry images. System namespaces excluded — they pull from public registries legitimately.
 
 ---
 
@@ -295,90 +320,180 @@ validate:
 
 Three labels on the namespace. `enforce` rejects violating pods. `audit` logs them. `warn` returns warnings to kubectl. All three set to `restricted`.
 
-```yaml
-labels:
-  pod-security.kubernetes.io/enforce: restricted
-  pod-security.kubernetes.io/audit: restricted
-  pod-security.kubernetes.io/warn: restricted
-```
-
 ---
 
 ### `Manifest/pod-security/test-privileged-pod.yml` — The Bad Pod
 
-Intentionally violates all four security controls simultaneously. Used in VerifySecurity Test 1 — pipeline asserts this apply **fails**.
-
-```yaml
-securityContext:
-  privileged: true    # violates PSS restricted
-  runAsUser: 0        # violates policy-no-root
-# image: nginx        # violates policy-acr-only
-# no resources        # violates policy-require-limits
-```
+Intentionally violates all four security controls simultaneously. Used in VerifySecurity Test 1 — the pipeline asserts this apply **fails**. If it succeeds, the pipeline exits 1.
 
 ---
 
 ### `Manifest/keyvault/secretproviderclass.yml` — CSI Wiring
 
-Tells the CSI driver which Key Vault to connect to, which secret to fetch, and which Managed Identity to use. Placeholders `$(workloadIdentityClientId)` and `$(tenantId)` are patched by the pipeline's Deploy stage via `sed`.
+Tells the CSI driver which Key Vault, which secret, and which identity to use. Placeholders patched by `sed` in the Deploy stage.
 
 ---
 
 ### `Manifest/keyvault/pod-with-secret.yml` — Secured Pod
 
-Satisfies all four security layers simultaneously:
-
-```yaml
-securityContext:
-  runAsNonRoot: true              # Kyverno + PSS
-  runAsUser: 1001                 # Kyverno (>= 1000)
-  allowPrivilegeEscalation: false # PSS restricted
-  capabilities:
-    drop:
-    - ALL                         # PSS restricted
-  readOnlyRootFilesystem: true    # PSS restricted
-resources:
-  limits:
-    cpu: 200m                     # Kyverno require-limits
-    memory: 128Mi                 # Kyverno require-limits
-volumeMounts:
-- mountPath: "/mnt/secrets"       # Key Vault CSI mount
-```
-
-`ACR_PLACEHOLDER` in the image field is replaced by `sed` in the Deploy stage with the actual ACR image tag.
+Satisfies all four security layers simultaneously via `securityContext`, resource limits, and CSI volume mount.
 
 ---
 
-### `azure-pipelines.yml` — 6-Stage Pipeline
+## VerifySecurity — The Three Tests Explained
 
-#### Stage 0 — Provision
-Creates RG, ACR, AKS with `--enable-workload-identity` and `--enable-addons azure-keyvault-secrets-provider`. Creates Key Vault, seeds `db-password` secret, creates Managed Identity `mi-secured-app`, grants it `Key Vault Secrets User` role, creates K8s ServiceAccount with workload identity annotation, and creates the federated credential linking the SA to the MI via AKS OIDC issuer.
+This is the most important stage in the pipeline. It does not just deploy and hope. It **proves** each security layer is actually working by running automated assertions. If any test fails, the pipeline exits with code 1.
 
-#### Stage 1 — Build
-Multi-stage Docker build targeting `runtime` stage. `USER 1001` in Dockerfile ensures the image satisfies Kyverno's non-root policy before it ever hits the cluster.
+---
 
-#### Stage 2 — Scan
-Trivy scans the image before push. `.trivyignore` covers known OS-level CVEs with no upstream fix in Debian 13. `--exit-code 1` blocks the pipeline on any unignored HIGH or CRITICAL CVE.
+### Test 1 — Kyverno + PSS Blocks bad-pod
 
-#### Stage 3 — Push
-Image pushed to ACR via MI. Tagged with commit SHA (immutable) and `latest` (pointer).
+**What it does:**
 
-#### Stage 4 — SetupSecurity (parallel with Build/Scan/Push)
-Installs Kyverno and Trivy Operator via Helm. Applies all three Kyverno ClusterPolicies. Applies PSS labels to `secured-app` namespace. Uses `BASE` variable for all file paths to handle the em dash in the folder name.
+The pipeline deliberately tries to deploy `test-privileged-pod.yml` — a pod that violates every security rule simultaneously:
 
-#### Stage 5 — Deploy (environment gate)
-Pauses for manual approval on `production` environment. Fetches MI client ID and tenant ID at runtime, patches `secretproviderclass.yml` via `sed`, patches `pod-with-secret.yml` with ACR image, applies both, waits for pod Ready (CSI driver must successfully mount the Key Vault secret).
+```yaml
+securityContext:
+  privileged: true    # full node access — PSS restricted blocks this
+  runAsUser: 0        # root — Kyverno disallow-root-containers blocks this
+# image: nginx        # public registry — Kyverno acr-images-only blocks this
+# no resources        # Kyverno require-resource-limits blocks this
+```
 
-#### Stage 6 — VerifySecurity
-Three automated tests that prove security is working. Pipeline fails if any test fails.
+**The assertion is inverted — success means failure:**
+
+```bash
+if kubectl apply -f "${BASE}/pod-security/test-privileged-pod.yml" 2>&1; then
+  echo "SECURITY FAILURE: bad-pod was NOT blocked"
+  exit 1
+else
+  echo "✅ Test 1 PASSED — bad-pod correctly blocked"
+fi
+```
+
+If `kubectl apply` **succeeds** → security is broken → pipeline fails.
+If `kubectl apply` **fails** → security is working → pipeline passes.
+
+**What the rejection looks like in the logs:**
+```
+Error from server (Forbidden):
+admission webhook "validate.kyverno.svc-fail" denied the request:
+disallow-root-containers: Containers must not run as root.
+Set securityContext.runAsNonRoot: true and runAsUser >= 1000.
+```
+
+**Why this matters:** Without this test, you'd deploy security policies and assume they work. A misconfigured Kyverno installation (webhook not registered, policy in Audit mode instead of Enforce) would silently allow bad pods through. This test catches that immediately.
+
+---
+
+### Test 2 — Trivy Operator Generated VulnerabilityReport
+
+**What it does:**
+
+Trivy Operator runs as a controller inside the cluster. When it detects a new pod, it creates a scan Job in `trivy-system`, runs Trivy against the pod's image, and writes the results as a `VulnerabilityReport` CRD in the pod's namespace.
+
+The pipeline polls for this CRD every 10 seconds for up to 3 minutes:
+
+```bash
+RETRIES=18
+for i in $(seq 1 $RETRIES); do
+  REPORT_COUNT=$(kubectl get vulnerabilityreport -n secured-app --no-headers | wc -l)
+  if [ "$REPORT_COUNT" -gt "0" ]; then
+    echo "✅ Test 2 PASSED — ${REPORT_COUNT} VulnerabilityReport(s) found"
+    break
+  fi
+  sleep 10
+done
+```
+
+**What a VulnerabilityReport contains:**
+```bash
+kubectl get vulnerabilityreport -n secured-app
+# NAME                              REPOSITORY    TAG       SCANNER   AGE
+# pod-secured-app-pod-app           secured-app   b045285   Trivy     2m
+
+kubectl describe vulnerabilityreport -n secured-app
+# Lists every CVE found in the running image:
+# severity, fixed version, description, links
+```
+
+**Pipeline Trivy vs Trivy Operator — the difference:**
+
+| Pipeline Trivy (Stage 2) | Trivy Operator (Test 2) |
+|---|---|
+| Runs before image is pushed | Runs after pod is deployed |
+| Blocks pipeline on CVEs | Reports CVEs as K8s CRDs |
+| One-time scan at build time | Continuous — rescans periodically |
+| Runs on MS-hosted agent VM | Runs inside AKS as a controller |
+| Catches CVEs before cluster | Catches new CVEs after deployment |
+
+Both are needed. Pipeline Trivy blocks at build time. Trivy Operator catches CVEs discovered after the image was deployed — the CVE database updates daily, so a clean image today may have a new CVE next week.
+
+**The Kyverno conflict — what happened in this lab:**
+Trivy Operator creates scan Jobs internally to scan pods. Those Jobs run as root. If Kyverno's `disallow-root-containers` policy excludes `trivy-system`, Kyverno blocks those Jobs and Trivy can never produce a report. The fix: always exclude `trivy-system` from the no-root policy.
+
+---
+
+### Test 3 — Key Vault Secret Mounted in Pod
+
+**What it does:**
+
+Reads `/mnt/secrets/db-password` from inside the running pod using `kubectl exec`:
+
+```bash
+SECRET_VALUE=$(kubectl exec secured-app-pod \
+  -n secured-app -- cat /mnt/secrets/db-password 2>/dev/null)
+
+if [ -z "${SECRET_VALUE}" ]; then
+  echo "FAILURE: Secret not mounted. Key Vault CSI integration failed."
+  exit 1
+else
+  echo "✅ Test 3 PASSED — Secret mounted from Azure Key Vault"
+  echo "Secret length: ${#SECRET_VALUE} characters (value redacted)"
+fi
+```
+
+**The full chain this test validates:**
+
+```
+Azure Key Vault → secret "db-password" exists
+       ↓
+Managed Identity → has Key Vault Secrets User RBAC role
+       ↓
+Federated Credential → K8s SA linked to MI via AKS OIDC issuer
+       ↓
+SecretProviderClass → tells CSI driver: vault name, secret name, identity
+       ↓
+pod-with-secret.yml → mounts CSI volume at /mnt/secrets
+       ↓
+CSI Driver → fetches secret at pod start, mounts as TMPFS file
+       ↓
+kubectl exec cat → file readable inside pod ← Test 3 checks this
+```
+
+If any link breaks — wrong vault name, wrong MI permissions, wrong federated credential subject, wrong namespace in SecretProviderClass — the file is empty or the pod fails to start. The test catches any break.
+
+**Why the value is redacted in logs:**
+The pipeline prints `Secret length: N characters` instead of the actual value. This prevents the secret from appearing in ADO pipeline logs, which are accessible to anyone with ADO project access.
+
+**What TMPFS means:**
+`kubectl get secret -n secured-app` returns nothing. The secret was never stored in Kubernetes. The file at `/mnt/secrets/db-password` exists only in the pod's RAM — gone the moment the pod stops.
+
+---
+
+### Why All Three Tests Must Pass
+
+| Test | Layer It Proves | What Fails If Skipped |
+|---|---|---|
+| Test 1 | Admission control enforcing | Misconfigured policy silently allows root containers |
+| Test 2 | Runtime scanning active | New CVEs in running images go undetected |
+| Test 3 | Secrets from Key Vault only | No proof secrets aren't also stored in etcd somewhere |
 
 ---
 
 ## ADO Setup Required Before Running
 
 ### Variable Group: `gitops-lab16-vars`
-
-ADO → Pipelines → Library → + Variable group
 
 | Variable | Secret? | Value |
 |---|---|---|
@@ -390,81 +505,40 @@ ADO → Pipelines → Library → + Variable group
 | `aksCluster` | No | `aks-gitops-lab16` |
 | `keyVaultName` | No | `kv-gitops-lab16` |
 
-### Production Environment
-Reuse the existing `production` environment from Lab 15. Approval gate already configured.
-
 ---
 
 ## The BASE Variable — Why Not $(basePath)?
 
-The folder name contains an em dash (`—`) and commas. When ADO expands `$(basePath)` inside a bash script, the shell splits the value at the em dash — treating the rest as a separate argument. The path breaks.
-
-Fix: set `BASE` as a bash variable inside each script block. Bash handles special characters inside quoted variable assignments correctly.
+The folder name contains an em dash. ADO expands `$(basePath)` before bash sees it — the shell splits at the em dash. Fix: set `BASE` inside each bash script block.
 
 ```bash
-# BROKEN — ADO expands before bash sees it, em dash splits path
+# BROKEN
 kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/kyverno/policy.yml"
 
-# CORRECT — bash handles the full string including em dash
+# CORRECT
 BASE="$(Build.SourcesDirectory)/Kubernetes/Hands-On-16 — Harden, Secure, and Operate Production/Manifest"
 kubectl apply -f "${BASE}/kyverno/policy.yml"
 ```
 
 ---
 
-## VerifySecurity — The Three Tests
-
-### Test 1 — Kyverno + PSS Blocks bad-pod
-
-```bash
-kubectl apply -f "${BASE}/pod-security/test-privileged-pod.yml"
-# Expected: Error from server (Forbidden) — rejected by admission control
-# If apply SUCCEEDS → pipeline exits 1 — SECURITY FAILURE
-```
-
-### Test 2 — Trivy Operator Generated VulnerabilityReport
-
-```bash
-kubectl get vulnerabilityreport -n secured-app
-# Expected: at least 1 report auto-generated by Trivy Operator
-# Polls every 10s for 3 minutes — fails if no report appears
-```
-
-### Test 3 — Key Vault Secret Mounted in Pod
-
-```bash
-kubectl exec secured-app-pod -n secured-app -- cat /mnt/secrets/db-password
-# Expected: non-empty value (secret redacted in logs)
-# If empty → pipeline exits 1 — CSI integration failed
-```
-
----
-
 ## How to Verify in Azure Portal
 
-### 1. Resource Group
-Portal → Resource Groups → `rg-gitops-lab16`
-Shows: AKS, ACR, Key Vault, Managed Identity, VNet
+**Resource Group** → Portal → Resource Groups → `rg-gitops-lab16` — AKS, ACR, Key Vault, MI, VNet.
 
-### 2. Key Vault Secret
-Portal → Key Vaults → `kv-gitops-lab16` → Secrets → `db-password`
-Shows: secret exists, access logs show CSI driver fetching it at pod start
+**Key Vault Secret** → Portal → Key Vaults → `kv-gitops-lab16` → Secrets → `db-password` — secret exists, access logs show CSI driver fetching it.
 
-### 3. ACR Image
-Portal → Container Registries → `acrgitopslab16` → Repositories → `secured-app`
-Shows: 2 tags — `latest` and commit SHA
+**ACR Image** → Portal → Container Registries → `acrgitopslab16` → Repositories → `secured-app` — 2 tags: `latest` + commit SHA.
 
-### 4. AKS Workloads
-Portal → Kubernetes Services → `aks-gitops-lab16` → Workloads → namespace: `secured-app`
-Shows: `secured-app-pod` running
+**AKS Workloads** → Portal → Kubernetes Services → `aks-gitops-lab16` → Workloads → namespace: `secured-app` — `secured-app-pod` running.
 
-### 5. Kyverno Policies
+**Kyverno Policies:**
 ```bash
 kubectl get clusterpolicy
 kubectl describe clusterpolicy disallow-root-containers
 ```
 
-### 6. Trivy VulnerabilityReports
+**Trivy VulnerabilityReports:**
 ```bash
 kubectl get vulnerabilityreport -n secured-app
 kubectl describe vulnerabilityreport -n secured-app
@@ -477,8 +551,6 @@ kubectl describe vulnerabilityreport -n secured-app
 ```bash
 az group delete --name rg-gitops-lab16 --yes --no-wait
 ```
-
-Deletes everything: AKS, ACR, Key Vault, Managed Identity, VNet.
 
 ---
 
@@ -501,27 +573,24 @@ Deletes everything: AKS, ACR, Key Vault, Managed Identity, VNet.
 | `ACR_PLACEHOLDER` | Marker in pod-with-secret.yml replaced by `sed` in Deploy stage |
 | BASE variable | Bash variable for file paths — avoids em dash breaking path expansion |
 | VerifySecurity stage | Automated proof that all 4 security layers work. Pipeline fails if any test fails. |
+| Kyverno + trivy-system exclude | Required so Trivy Operator's scan jobs (which run as root) are not blocked by the no-root policy |
 
 ---
 
 ## Production Notes
 
-- **Kyverno `Audit` mode first** — in real migrations, start with `validationFailureAction: Audit` to discover violations without blocking. Switch to `Enforce` after fixing all violations.
-- **Kyverno mutation** — beyond validation, Kyverno can mutate resources. Example: auto-inject `runAsNonRoot: true` on any pod that doesn't set it. Useful for teams that forget.
-- **PSS vs Kyverno** — PSS covers pod-level security fields only, built-in, zero tooling. Kyverno covers anything: registry enforcement, label requirements, naming conventions, resource quotas. Use both.
+- **Kyverno `Audit` mode first** — in real migrations, start with `Audit` to discover violations without blocking. Switch to `Enforce` after fixing all violations.
+- **Kyverno mutation** — beyond validation, Kyverno can auto-inject `runAsNonRoot: true` on any pod that doesn't set it.
+- **PSS vs Kyverno** — PSS covers pod-level security fields only, built-in, zero tooling. Kyverno covers anything. Use both.
 - **Trivy Operator reports in CI** — pipe `kubectl get vulnerabilityreport -o json` into your reporting pipeline. Fail deployments if critical CVEs appear in running pods.
-- **Key Vault rotation** — CSI driver polls Key Vault periodically (configurable). When secret rotates in Key Vault, mounted file updates automatically — no pod restart needed.
-- **Multiple secrets** — `SecretProviderClass` supports multiple objects in the `array`. Add more `objectName` entries to mount additional secrets.
-- **Key Vault soft delete** — enabled by default. Deleted secrets recoverable for 90 days. Important for DR.
-- **Kyverno PolicyException** — production escape hatch. If a legitimate workload needs to violate a policy (e.g., a DaemonSet needing host network), create a `PolicyException` CRD scoped to that specific resource instead of weakening the global policy.
+- **Key Vault rotation** — CSI driver polls Key Vault periodically. When secret rotates in Key Vault, mounted file updates automatically — no pod restart needed.
+- **Kyverno PolicyException** — production escape hatch for legitimate violations. Scoped to a specific resource — doesn't weaken the global policy.
 
 ---
 
 ## What's Next
 
 **Hands-On 16 is the final lab.**
-
-You have now built, deployed, observed, automated, and secured a production-grade Kubernetes platform on Azure:
 
 | Lab | What You Built |
 |---|---|
