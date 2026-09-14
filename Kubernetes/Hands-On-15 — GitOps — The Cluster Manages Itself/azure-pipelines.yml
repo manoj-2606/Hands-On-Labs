@@ -1,0 +1,501 @@
+# ================================================================
+# Hands-On 15 — GitOps: The Cluster Manages Itself
+# ================================================================
+# CI pipeline only. ArgoCD handles CD.
+#
+# Flow:
+#   Provision ──► Build ──► Scan ──► Push ──┐
+#   Provision ──► SetupArgoCD ──────────────┤
+#                                           ▼
+#                                    UpdateManifest (env gate)
+#                                           │
+#                                    ArgoCD auto-syncs AKS
+#
+# Variable group: gitops-lab-vars
+#   serviceConnection  — MI-ADO-API
+#   resourceGroup      — e.g. rg-gitops-lab
+#   location           — e.g. centralindia
+#   acrName            — e.g. acrgitopslab (globally unique)
+#   acrLoginServer     — e.g. acrgitopslab.azurecr.io
+#   aksCluster         — e.g. aks-gitops-lab
+# ================================================================
+
+trigger: none
+
+variables:
+  - group: gitops-lab-vars
+  - name: imageName
+    value: "gitops-app"
+  - name: imageTag
+    value: "$(Build.SourceVersion)"
+  - name: basePath
+    value: "Kubernetes/Hands-On-15 — GitOps — The Cluster Manages Itself/Manifest"
+
+# ============================================================
+# Stage 0 — Provision
+# Creates RG, ACR, AKS sequentially.
+# ACR attached to AKS so pods pull images without pull secrets.
+# Idempotent — safe to rerun on every pipeline trigger.
+# ============================================================
+stages:
+  - stage: Provision
+    displayName: "Provision — RG, ACR, AKS"
+    jobs:
+      - job: ProvisionInfra
+        displayName: "Create RG, ACR and AKS"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: AzureCLI@2
+            displayName: "Create Resource Group"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az group create \
+                  --name $(resourceGroup) \
+                  --location $(location) \
+                  --output none
+                echo "Resource Group: $(resourceGroup) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Create Azure Container Registry"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr create \
+                  --name $(acrName) \
+                  --resource-group $(resourceGroup) \
+                  --sku Basic \
+                  --admin-enabled false \
+                  --output none
+                echo "ACR: $(acrLoginServer) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Create AKS Cluster"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks create \
+                  --name $(aksCluster) \
+                  --resource-group $(resourceGroup) \
+                  --location $(location) \
+                  --node-count 1 \
+                  --node-vm-size Standard_B2s \
+                  --generate-ssh-keys \
+                  --attach-acr $(acrName) \
+                  --enable-oidc-issuer \
+                  --output none
+                echo "AKS Cluster: $(aksCluster) — ready"
+
+          - task: AzureCLI@2
+            displayName: "Verify Provisioned Resources"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "=============================="
+                echo "Resource Group"
+                echo "=============================="
+                az group show --name $(resourceGroup) \
+                  --query "{name:name, location:location, state:properties.provisioningState}" \
+                  -o table
+
+                echo ""
+                echo "=============================="
+                echo "Container Registry"
+                echo "=============================="
+                az acr show --name $(acrName) --resource-group $(resourceGroup) \
+                  --query "{name:name, loginServer:loginServer, sku:sku.name, state:provisioningState}" \
+                  -o table
+
+                echo ""
+                echo "=============================="
+                echo "AKS Cluster"
+                echo "=============================="
+                az aks show --name $(aksCluster) --resource-group $(resourceGroup) \
+                  --query "{name:name, location:location, state:provisioningState, k8sVersion:kubernetesVersion}" \
+                  -o table
+
+  # ============================================================
+  # Stage 1 — Build
+  # Multi-stage Docker build targeting runtime stage only.
+  # Image tar passed to Scan stage via pipeline artifact.
+  # ============================================================
+  - stage: Build
+    displayName: "Build Docker Image"
+    dependsOn: Provision
+    jobs:
+      - job: DockerBuild
+        displayName: "Multi-Stage Docker Build"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+
+          - script: |
+              docker build \
+                --target runtime \
+                --file "$(Build.SourcesDirectory)/$(basePath)/app/Dockerfile" \
+                --tag $(imageName):$(imageTag) \
+                --tag $(imageName):latest \
+                "$(Build.SourcesDirectory)/$(basePath)/app"
+            displayName: "Build multi-stage image — target runtime stage"
+
+          - script: |
+              docker images | grep $(imageName)
+            displayName: "Verify image exists and print size"
+
+          - script: |
+              docker save $(imageName):$(imageTag) | gzip > /tmp/image.tar.gz
+            displayName: "Save image as tar for Scan stage"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish image tar artifact"
+            inputs:
+              targetPath: "/tmp/image.tar.gz"
+              artifact: "docker-image"
+              publishLocation: "pipeline"
+
+  # ============================================================
+  # Stage 2 — Scan
+  # Trivy blocks pipeline on CRITICAL or HIGH CVEs.
+  # JSON results published as artifact for audit trail.
+  # ============================================================
+  - stage: Scan
+    displayName: "Trivy Vulnerability Scan"
+    dependsOn: Build
+    jobs:
+      - job: TrivyScan
+        displayName: "Scan with Trivy"
+        workspace:
+          clean: all
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download image tar from Build stage"
+            inputs:
+              artifactName: "docker-image"
+              targetPath: "$(Pipeline.Workspace)/docker-image"
+
+          - script: |
+              docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+              docker images | grep $(imageName)
+            displayName: "Load image into Docker daemon"
+
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                | sh -s -- -b /usr/local/bin
+              trivy --version
+            displayName: "Install Trivy"
+
+          - script: |
+              trivy image \
+                --severity CRITICAL,HIGH \
+                --exit-code 1 \
+                --format table \
+                $(imageName):$(imageTag)
+            displayName: "Scan — block pipeline on CRITICAL or HIGH CVE"
+
+          - script: |
+              trivy image \
+                --severity CRITICAL,HIGH \
+                --format json \
+                --output /tmp/trivy-results.json \
+                $(imageName):$(imageTag) || true
+            displayName: "Export scan results to JSON artifact"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Trivy scan results"
+            inputs:
+              targetPath: "/tmp/trivy-results.json"
+              artifact: "trivy-scan"
+              publishLocation: "pipeline"
+
+  # ============================================================
+  # Stage 3 — Push
+  # MI-ADO-API service connection handles ACR auth via OIDC.
+  # No stored credentials, no rotation needed.
+  # Tagged with commit SHA (immutable) and latest (pointer).
+  # ============================================================
+  - stage: Push
+    displayName: "Push to ACR"
+    dependsOn: Scan
+    jobs:
+      - job: ACRPush
+        displayName: "Push image to ACR via MI"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download image tar from Build stage"
+            inputs:
+              artifactName: "docker-image"
+              targetPath: "$(Pipeline.Workspace)/docker-image"
+
+          - script: |
+              docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+              docker images | grep $(imageName)
+            displayName: "Load image into Docker daemon"
+
+          - task: AzureCLI@2
+            displayName: "Login to ACR via MI and push"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr login --name $(acrName)
+
+                docker tag $(imageName):$(imageTag) $(acrLoginServer)/$(imageName):$(imageTag)
+                docker tag $(imageName):$(imageTag) $(acrLoginServer)/$(imageName):latest
+
+                docker push $(acrLoginServer)/$(imageName):$(imageTag)
+                docker push $(acrLoginServer)/$(imageName):latest
+
+                echo "Pushed: $(acrLoginServer)/$(imageName):$(imageTag)"
+                echo "Pushed: $(acrLoginServer)/$(imageName):latest"
+
+          - task: AzureCLI@2
+            displayName: "Verify image exists in ACR"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "=============================="
+                echo "Images in ACR"
+                echo "=============================="
+                az acr repository show-tags \
+                  --name $(acrName) \
+                  --repository $(imageName) \
+                  --orderby time_desc \
+                  --output table
+
+  # ============================================================
+  # Stage 4 — Setup ArgoCD
+  # Runs in PARALLEL with Build/Scan/Push (depends only on Provision).
+  # Installs ArgoCD via Helm.
+  # Repo credentials use an ADO access token generated at runtime
+  # from the MI service connection — no PAT, no secret variable.
+  # Idempotent — helm upgrade --install, kubectl apply.
+  # ============================================================
+  - stage: SetupArgoCD
+    displayName: "Setup ArgoCD on AKS"
+    dependsOn: Provision
+    jobs:
+      - job: InstallArgoCD
+        displayName: "Install and configure ArgoCD"
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+
+          - task: AzureCLI@2
+            displayName: "Get AKS credentials"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+                kubectl get nodes
+
+          - task: AzureCLI@2
+            displayName: "Install ArgoCD via Helm"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                if ! command -v helm &> /dev/null; then
+                  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                fi
+
+                helm repo add argo https://argoproj.github.io/argo-helm
+                helm repo update
+
+                kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+                helm upgrade --install argocd argo/argo-cd \
+                  --namespace argocd \
+                  --set server.service.type=LoadBalancer \
+                  --wait \
+                  --timeout 5m
+
+                echo ""
+                echo "=============================="
+                echo "ArgoCD Pods"
+                echo "=============================="
+                kubectl get pods -n argocd
+
+          # -------------------------------------------------------
+          # ADO repo is private. ArgoCD needs credentials to clone it.
+          # MI-based approach: fetch a short-lived ADO access token
+          # from the Azure DevOps resource using the MI identity.
+          # Token is valid for 1 hour — enough for ArgoCD to clone
+          # and cache. For production, rotate via a CronJob or use
+          # ArgoCD's repo-server with azure-devops credential template.
+          # -------------------------------------------------------
+          - task: AzureCLI@2
+            displayName: "Configure ArgoCD repo credentials via MI token"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                # Fetch short-lived token for ADO resource using MI
+                ADO_TOKEN=$(az account get-access-token \
+                  --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+                  --query accessToken -o tsv)
+
+                kubectl create secret generic ado-repo-creds \
+                  --namespace argocd \
+                  --from-literal=type=git \
+                  --from-literal=url="https://dev.azure.com/manojmanojkumar2513/Hands-On-Labs/_git/Hands-On-Labs" \
+                  --from-literal=username=bearer \
+                  --from-literal=password="${ADO_TOKEN}" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+
+                kubectl label secret ado-repo-creds -n argocd \
+                  argocd.argoproj.io/secret-type=repository --overwrite
+
+                echo "ArgoCD repo credentials configured — MI token injected"
+
+          - task: AzureCLI@2
+            displayName: "Apply ArgoCD Application CRD"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                kubectl apply -f "$(Build.SourcesDirectory)/$(basePath)/argocd/application.yml"
+
+                echo ""
+                echo "=============================="
+                echo "ArgoCD Application"
+                echo "=============================="
+                kubectl get applications -n argocd
+
+          - task: AzureCLI@2
+            displayName: "Print ArgoCD UI access info"
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(resourceGroup) \
+                  --name $(aksCluster) \
+                  --overwrite-existing
+
+                echo "=============================="
+                echo "ArgoCD Admin Password"
+                echo "=============================="
+                ARGO_PASS=$(kubectl -n argocd get secret argocd-initial-admin-secret \
+                  -o jsonpath="{.data.password}" | base64 -d)
+                echo "Username: admin"
+                echo "Password: ${ARGO_PASS}"
+
+                echo ""
+                echo "=============================="
+                echo "ArgoCD UI External IP"
+                echo "=============================="
+                kubectl get svc argocd-server -n argocd \
+                  -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+                echo ""
+                echo "(May take 1-2 minutes for External IP to assign)"
+
+  # ============================================================
+  # Stage 5 — Update Manifest (GitOps trigger)
+  # Waits for both Push and SetupArgoCD to complete.
+  # Replaces IMAGE_PLACEHOLDER in deployment.yml with the
+  # actual ACR image tag, commits, and pushes to main.
+  # ArgoCD detects the diff and syncs the cluster — no kubectl.
+  #
+  # Environment gate: "production" in ADO → Pipelines → Environments
+  # Add Approvals and Checks → Approvals. Pipeline pauses here
+  # until a reviewer approves.
+  #
+  # PREREQUISITE: Grant the Build Service "Contribute" on the repo:
+  # Project Settings → Repos → Security
+  # → <Project> Build Service → Contribute = Allow
+  # ============================================================
+  - stage: UpdateManifest
+    displayName: "Update Manifest in Git — triggers ArgoCD"
+    dependsOn:
+      - Push
+      - SetupArgoCD
+    jobs:
+      - deployment: GitPush
+        displayName: "Patch image tag and push to Git"
+        pool:
+          vmImage: "ubuntu-latest"
+        environment: production
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+                  persistCredentials: true
+
+                - script: |
+                    DEPLOY_FILE="$(Build.SourcesDirectory)/$(basePath)/k8s-manifests/deployment.yml"
+                    FULL_IMAGE="$(acrLoginServer)/$(imageName):$(imageTag)"
+
+                    echo "Patching image to: ${FULL_IMAGE}"
+                    sed -i "s|image:.*|image: ${FULL_IMAGE}|" "${DEPLOY_FILE}"
+
+                    echo ""
+                    echo "=============================="
+                    echo "Updated deployment.yml (image line)"
+                    echo "=============================="
+                    grep "image:" "${DEPLOY_FILE}"
+                  displayName: "Replace IMAGE_PLACEHOLDER with ACR image"
+
+                - script: |
+                    git config user.email "pipeline@ado.com"
+                    git config user.name "ADO Pipeline [MI-ADO-API]"
+                    git checkout main
+
+                    git add "$(basePath)/k8s-manifests/deployment.yml"
+                    git commit -m "chore: update $(imageName) to $(imageTag) [skip ci]"
+                    git push origin main
+
+                    echo ""
+                    echo "=============================="
+                    echo "Git push complete"
+                    echo "=============================="
+                    echo "Image: $(acrLoginServer)/$(imageName):$(imageTag)"
+                    echo "ArgoCD will detect this change and sync the cluster."
+                  displayName: "Git commit and push — triggers ArgoCD sync"
