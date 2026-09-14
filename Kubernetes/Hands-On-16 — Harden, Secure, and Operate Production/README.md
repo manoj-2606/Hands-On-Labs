@@ -600,4 +600,4 @@ az group delete --name rg-gitops-lab16 --yes --no-wait
 | 15 | GitOps — ArgoCD, drift detection, manifest update pattern |
 | 16 | Security — Kyverno, PSS, Trivy Operator, Azure Key Vault |
 
-This is the stack EU/Nordic platform engineering teams run in production.
+--This is the stack EU/Nordic platform engineering teams run in production.--
